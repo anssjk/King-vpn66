@@ -1,0 +1,78 @@
+{
+  "expo": {
+    "name": "KING VPN",
+    "slug": "king-vpn",
+    "version": "1.9.5",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "kingvpn",
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#05070F",
+    "ios": {
+      "bundleIdentifier": "com.kingvpn.app",
+      "buildNumber": "1",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.kingvpn.app",
+      "versionCode": 16,
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+        "android.permission.BIND_VPN_SERVICE"
+      ],
+      "predictiveBackGestureEnabled": false,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#05070F",
+        "monochromeImage": "./assets/images/monochrome-icon.png"
+      },
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "output": "single"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#05070F",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/notification-icon.png",
+          "color": "#E8B44A"
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 29,
+            "targetSdkVersion": 36,
+            "compileSdkVersion": 36,
+            "buildArchs": [
+              "arm64-v8a",
+              "armeabi-v7a"
+            ]
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
