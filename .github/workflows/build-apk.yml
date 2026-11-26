@@ -1,12 +1,4 @@
-
 name: Build KING VPN APK
-
-# ساخت APK اندروید روی سرور گیت‌هاب — بدون کامپیوتر و بدون Termux.
-# راهنمای استفاده: فایل GITHUB_ACTIONS_GUIDE.md
-#
-# این فایل باید دقیقاً در این مسیر باشد:
-#   .github/workflows/build-apk.yml
-# گیت‌هاب فقط فایل‌های داخل .github/workflows/ در ریشه‌ی ریپو را می‌شناسد.
 
 on:
   workflow_dispatch:
@@ -34,7 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # اگر پروژه در ریشه‌ی ریپو نیست (مثلاً داخل یک پوشه یا zip)، پیدایش می‌کنیم.
       - name: Locate the app source
         run: |
           set -e
@@ -65,8 +56,6 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # تمام مراحل بیلد در scripts/ci-build-apk.sh است تا این فایل کوتاه بماند.
-      # هیچ آدرس پنلی اینجا لازم نیست: کاربر آن را در اولین اجرای اپ وارد می‌کند.
       - name: Build the APK
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -81,3 +70,10 @@ jobs:
           path: output/king-vpn.apk
           if-no-files-found: error
           retention-days: 90
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: gradle-build-log
+          path: output/gradle-build.log
+          if-no-files-found: ignore
