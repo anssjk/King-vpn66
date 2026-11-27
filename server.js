@@ -1,9 +1,23 @@
+/**
+ * KING VPN panel — the backend the app talks to.
+ *
+ * What it does:
+ *   POST /api/token            → issues a token (the app never asks the user for one)
+ *   GET  /api/token/:token     → { valid: true|false }
+ *   GET  /api/servers          → the servers for the caller's token, best first
+ *   GET  /token                → a small page where a token can be created by hand
+ *   GET  /admin                → a page to add / remove servers (protected by ADMIN_KEY)
+ *   GET  /health               → liveness probe for Railway
+ *
+ * Storage is a JSON file under DATA_DIR (mount a Railway volume there so it survives a
+ * redeploy). No database is required, and nothing is invented: the servers the app shows
+ * are exactly the links an admin added here.
+ */
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
-const net = require('net');
 const { spawn } = require('child_process');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -13,7 +27,9 @@ const DB_FILE = path.join(DATA_DIR, 'db.json');
 
 const GROUPS = ['trojan', 'vless', 'vmess', 'vless-hu'];
 
-// ---------------- Storage ----------------
+// ---------------------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------------------
 
 function ensureDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -32,6 +48,7 @@ function loadDb() {
       builtInHost: typeof parsed.builtInHost === 'string' ? parsed.builtInHost : '',
     };
   } catch {
+    // A corrupt file must not take the panel down; start clean but keep a copy.
     try {
       fs.copyFileSync(DB_FILE, `${DB_FILE}.corrupt-${Date.now()}`);
     } catch {
@@ -50,13 +67,19 @@ function saveDb() {
   fs.renameSync(tmp, DB_FILE);
 }
 
-// ---------------- Helpers ----------------
+// ---------------------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------------------
 
+/** HMAC of `text` keyed by ADMIN_KEY, so values derived from it are stable across redeploys. */
 function hmac(text) {
   return crypto.createHmac('sha256', ADMIN_KEY || 'king-vpn').update(text).digest('hex');
 }
 
-// Tokens are signed, so a redeploy never logs users out.
+/**
+ * Tokens are signed, not just stored: a valid signature is enough. That way a redeploy on
+ * Railway (which wipes an un-mounted data folder) never logs every user out.
+ */
 function newToken() {
   const rand = crypto.randomBytes(24).toString('hex');
   return rand + hmac(`token:${rand}`).slice(0, 16);
@@ -70,11 +93,13 @@ function isKnownToken(token) {
   return token.slice(48) === hmac(`token:${rand}`).slice(0, 16);
 }
 
+/** The panel's public address: PUBLIC_URL if set, otherwise taken from the request. */
 function originOf(req) {
   if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL.replace(/\/+$/, '');
   return `${req.protocol}://${req.get('host')}`;
 }
 
+/** One string holding both the panel address and the token: kv1.<b64url(origin)>.<token> */
 function connectionCode(req, token) {
   const b64 = Buffer.from(originOf(req), 'utf8').toString('base64url');
   return `kv1.${b64}.${token}`;
@@ -84,6 +109,7 @@ function newId() {
   return crypto.randomBytes(8).toString('hex');
 }
 
+/** The token from the `x-api-token` header, a bearer header, or a query parameter. */
 function tokenFrom(req) {
   const header = req.get('x-api-token');
   if (header) return String(header).trim();
@@ -104,19 +130,24 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
+/** Only these link schemes are accepted, so a typo cannot become a broken row. */
 function isSupportedLink(link) {
   return /^(vless|vmess|trojan|ss):\/\//i.test(link.trim());
 }
 
-// ---------------- Built-in Xray (VLESS / VMess / Trojan over WebSocket) ----------------
+// ---------------------------------------------------------------------------------------
+// Built-in Xray server: VLESS + REALITY over raw TCP, published through Railway's TCP Proxy
+// ---------------------------------------------------------------------------------------
 
 const XRAY_BIN = process.env.XRAY_BIN || '/usr/local/bin/xray';
 const XRAY_ENABLED = process.env.XRAY_AUTO !== '0' && fs.existsSync(XRAY_BIN);
-const WS_ROUTES = [
-  { path: '/vl', port: 10001, protocol: 'vless' },
-  { path: '/vm', port: 10002, protocol: 'vmess' },
-  { path: '/tr', port: 10003, protocol: 'trojan' },
-];
+// Must be the same number as the TCP Proxy's internal (application) port.
+const XRAY_PORT = Number(process.env.XRAY_PORT || 8443);
+const REALITY_DEST = process.env.REALITY_DEST || 'www.microsoft.com';
+// Public address of the TCP Proxy. The app sets TCP_HOST / TCP_PORT; Railway also provides
+// RAILWAY_TCP_PROXY_DOMAIN / RAILWAY_TCP_PROXY_PORT once the proxy exists.
+const TCP_HOST = process.env.TCP_HOST || process.env.RAILWAY_TCP_PROXY_DOMAIN || '';
+const TCP_PORT = process.env.TCP_PORT || process.env.RAILWAY_TCP_PROXY_PORT || '';
 
 function stableUuid() {
   const h = hmac('uuid').slice(0, 32).split('');
@@ -126,24 +157,48 @@ function stableUuid() {
   return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
 }
 
-function stablePassword() {
-  return hmac('trojan').slice(0, 24);
+/** A stable x25519 key pair derived from ADMIN_KEY, so a redeploy keeps the same links. */
+function realityKeys() {
+  const raw = Buffer.from(hmac('reality-key'), 'hex'); // 32 bytes
+  const der = Buffer.concat([Buffer.from('302e020100300506032b656e04220420', 'hex'), raw]);
+  const priv = crypto.createPrivateKey({ key: der, format: 'der', type: 'pkcs8' });
+  const spki = crypto.createPublicKey(priv).export({ format: 'der', type: 'spki' });
+  return {
+    privateKey: raw.toString('base64url'),
+    publicKey: spki.subarray(spki.length - 32).toString('base64url'),
+  };
+}
+
+function shortId() {
+  return hmac('reality-sid').slice(0, 16);
 }
 
 function startXray() {
   if (!XRAY_ENABLED) {
-    console.log('Xray is not installed here, so no built-in servers are created.');
+    console.log('Xray is not installed here, so no built-in server is created.');
     return;
   }
-  const uuid = stableUuid();
-  const password = stablePassword();
-  const ws = (p) => ({ network: 'ws', wsSettings: { path: p } });
   const config = {
     log: { loglevel: 'warning' },
+    // Small buffers and short idle time keep memory and CPU low.
+    policy: { levels: { 0: { handshake: 4, connIdle: 300, bufferSize: 4 } } },
     inbounds: [
-      { listen: '127.0.0.1', port: 10001, protocol: 'vless', settings: { clients: [{ id: uuid }], decryption: 'none' }, streamSettings: ws('/vl') },
-      { listen: '127.0.0.1', port: 10002, protocol: 'vmess', settings: { clients: [{ id: uuid }] }, streamSettings: ws('/vm') },
-      { listen: '127.0.0.1', port: 10003, protocol: 'trojan', settings: { clients: [{ password }] }, streamSettings: ws('/tr') },
+      {
+        listen: '0.0.0.0',
+        port: XRAY_PORT,
+        protocol: 'vless',
+        settings: { clients: [{ id: stableUuid(), flow: 'xtls-rprx-vision' }], decryption: 'none' },
+        streamSettings: {
+          network: 'tcp',
+          security: 'reality',
+          realitySettings: {
+            dest: `${REALITY_DEST}:443`,
+            serverNames: [REALITY_DEST],
+            privateKey: realityKeys().privateKey,
+            shortIds: [shortId()],
+          },
+        },
+      },
     ],
     outbounds: [{ protocol: 'freedom' }],
   };
@@ -151,7 +206,7 @@ function startXray() {
   const file = path.join(DATA_DIR, 'xray.json');
   fs.writeFileSync(file, JSON.stringify(config));
   const run = () => {
-    const child = spawn(XRAY_BIN, ['run', '-c', file], { stdio: 'inherit' });
+    const child = spawn(XRAY_BIN, ['run', '-c', file], { stdio: 'inherit', env: { ...process.env, GOGC: '50' } });
     child.on('exit', (code) => {
       console.warn(`xray exited (${code}); restarting in 2s`);
       setTimeout(run, 2000);
@@ -168,40 +223,37 @@ function regionLabel() {
   return 'Railway';
 }
 
-function builtInLinks(host) {
-  const uuid = stableUuid();
-  const password = stablePassword();
-  const label = regionLabel();
-  const common = `security=tls&sni=${host}&fp=chrome&type=ws&host=${host}`;
-  const vmess = {
-    v: '2', ps: `${label} VMess`, add: host, port: '443', id: uuid, aid: '0', scy: 'auto',
-    net: 'ws', type: 'none', host, path: '/vm', tls: 'tls', sni: host,
-  };
-  return [
-    { group: 'vless', name: `${label} VLESS`, link: `vless://${uuid}@${host}:443?encryption=none&${common}&path=%2Fvl#${encodeURIComponent(`${label} VLESS`)}` },
-    { group: 'vmess', name: `${label} VMess`, link: `vmess://${Buffer.from(JSON.stringify(vmess)).toString('base64')}` },
-    { group: 'trojan', name: `${label} Trojan`, link: `trojan://${password}@${host}:443?${common}&path=%2Ftr#${encodeURIComponent(`${label} Trojan`)}` },
-  ];
+/** The share link for the built-in server: the TCP Proxy's host and port, REALITY on top. */
+function builtInLink() {
+  const name = `${regionLabel()} VLESS Reality`;
+  const q = new URLSearchParams({
+    encryption: 'none',
+    flow: 'xtls-rprx-vision',
+    security: 'reality',
+    sni: REALITY_DEST,
+    fp: 'chrome',
+    pbk: realityKeys().publicKey,
+    sid: shortId(),
+    type: 'tcp',
+  });
+  return { name, link: `vless://${stableUuid()}@${TCP_HOST}:${TCP_PORT}?${q.toString()}#${encodeURIComponent(name)}` };
 }
 
-function ensureBuiltIn(req) {
-  if (!XRAY_ENABLED) return;
-  let host = '';
-  try {
-    host = new URL(originOf(req)).hostname;
-  } catch {
-    return;
-  }
-  if (!host || db.builtInHost === host) return;
+/** Make sure the built-in server is in the list and points at the current TCP Proxy. */
+function ensureBuiltIn() {
+  if (!XRAY_ENABLED || !TCP_HOST || !TCP_PORT) return;
+  const key = `${TCP_HOST}:${TCP_PORT}:${REALITY_DEST}`;
+  if (db.builtInHost === key) return;
+  const b = builtInLink();
   db.servers = db.servers.filter((s) => !s.builtIn);
-  builtInLinks(host).forEach((b, i) => {
-    db.servers.push({ id: newId(), group: b.group, link: b.link, name: b.name, order: -100 + i, createdAt: Date.now(), builtIn: true });
-  });
-  db.builtInHost = host;
+  db.servers.push({ id: newId(), group: 'vless', link: b.link, name: b.name, order: -100, createdAt: Date.now(), builtIn: true });
+  db.builtInHost = key;
   saveDb();
 }
 
-// ---------------- API ----------------
+// ---------------------------------------------------------------------------------------
+// API
+// ---------------------------------------------------------------------------------------
 
 const app = express();
 app.set('trust proxy', true);
@@ -233,13 +285,17 @@ app.get('/api/servers', (req, res) => {
     return res.status(401).json({ error: 'A valid token is required.' });
   }
   ensureBuiltIn(req);
+  // The order is the panel's own: `order` ascending, then newest first. The app treats
+  // the first row of a group as that group's fastest server.
   const servers = [...db.servers]
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || b.createdAt - a.createdAt)
     .map((s) => ({ id: s.id, group: s.group, link: s.link, name: s.name }));
   res.json({ servers });
 });
 
-// ---------------- Admin API ----------------
+// ---------------------------------------------------------------------------------------
+// Admin API
+// ---------------------------------------------------------------------------------------
 
 app.get('/api/admin/servers', requireAdmin, (_req, res) => {
   res.json({ servers: db.servers });
@@ -281,7 +337,9 @@ app.delete('/api/admin/servers/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------------- Pages ----------------
+// ---------------------------------------------------------------------------------------
+// Pages
+// ---------------------------------------------------------------------------------------
 
 const page = (title, body) => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -305,6 +363,8 @@ const page = (title, body) => `<!doctype html>
   .muted{color:#7e8dab;font-size:12px;margin-top:10px}
   input,select{width:100%;padding:11px 12px;margin-bottom:10px;border-radius:11px;border:1px solid rgba(140,170,230,.22);
     background:#0b1020;color:#f2f6ff;font-size:14px}
+  .row{display:flex;gap:8px}
+  .row>*{flex:1}
   ul{list-style:none;padding:0;margin:16px 0 0}
   li{display:flex;gap:8px;align-items:center;padding:9px 0;border-top:1px solid rgba(140,170,230,.12);font-size:12.5px}
   li span{flex:1;word-break:break-all;color:#a3b1cc}
@@ -319,10 +379,12 @@ app.get('/token', (_req, res) => {
     page(
       'KING VPN — token',
       `<h1>KING <span style="color:#4da3ff">VPN</span></h1>
-       <p>Press the button to create a token.</p>
+       <p>Press the button to create a token. The app asks for one automatically, so you only
+       need this page if you want a token by hand.</p>
        <button onclick="make()">Create a token</button>
        <div id="out"></div>
-       <p class="muted">Keep it private: anyone with it can read the server list.</p>
+       <p class="muted">Tokens are stored on this panel. Keep one private: anyone with it can
+       read the server list.</p>
        <script>
          async function make(){
            const r = await fetch('/api/token',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -341,7 +403,8 @@ app.get('/admin', (_req, res) => {
     page(
       'KING VPN — admin',
       `<h1>Servers</h1>
-       <p>Add a share link to a group.</p>
+       <p>Add a share link to a group. The first server of a group is the one
+       “Fastest country” and that group's button connect to.</p>
        <input id="key" placeholder="Admin key" type="password">
        <select id="group">
          <option value="trojan">Trojan</option>
@@ -388,30 +451,10 @@ app.use((_req, res) => res.status(404).json({ error: 'Not found.' }));
 
 const server = http.createServer(app);
 
-// Railway gives one public port, so WebSocket upgrades are routed to Xray by path.
-server.on('upgrade', (req, socket, head) => {
-  const route = WS_ROUTES.find((r) => (req.url || '').startsWith(r.path));
-  if (!route || !XRAY_ENABLED) {
-    socket.destroy();
-    return;
-  }
-  const upstream = net.connect(route.port, '127.0.0.1', () => {
-    let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
-    for (let i = 0; i < req.rawHeaders.length; i += 2) {
-      raw += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
-    }
-    upstream.write(`${raw}\r\n`);
-    if (head && head.length) upstream.write(head);
-    socket.pipe(upstream).pipe(socket);
-  });
-  upstream.on('error', () => socket.destroy());
-  socket.on('error', () => upstream.destroy());
-  socket.on('close', () => upstream.destroy());
-});
-
 server.listen(PORT, () => {
   console.log(`KING VPN panel listening on ${PORT}`);
   console.log(`data file: ${DB_FILE}`);
   if (!ADMIN_KEY) console.warn('ADMIN_KEY is not set — /admin and the admin API are disabled.');
+  if (XRAY_ENABLED && (!TCP_HOST || !TCP_PORT)) console.warn('TCP Proxy is not set up yet — no built-in link is published.');
   startXray();
 });
