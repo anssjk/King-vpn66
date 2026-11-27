@@ -50,9 +50,25 @@ jobs:
 
       - name: Publish panel branch
         run: |
-          set -e
+          SRC=""
+          for d in "$APP_DIR/server" "$PWD/server" "$PWD/_src"/*/server; do
+            if [ -f "$d/server.js" ]; then SRC="$d"; break; fi
+          done
+          if [ -z "$SRC" ]; then
+            ZIP=$(ls -1 *.zip 2>/dev/null | head -n 1 || true)
+            if [ -n "$ZIP" ]; then
+              rm -rf /tmp/z && mkdir -p /tmp/z && unzip -q -o "$ZIP" -d /tmp/z
+              F=$(find /tmp/z -maxdepth 4 -name server.js -not -path '*/node_modules/*' | head -n 1 || true)
+              if [ -n "$F" ]; then SRC=$(dirname "$F"); fi
+            fi
+          fi
+          if [ -z "$SRC" ]; then
+            echo "::warning::پوشه‌ی server (پنل) پیدا نشد؛ شاخه‌ی panel ساخته نمی‌شود. زیپ کامل اپ را آپلود کن."
+            exit 0
+          fi
+          echo "Panel source: $SRC"
           rm -rf /tmp/panel && mkdir -p /tmp/panel
-          cp -r "$APP_DIR/server/." /tmp/panel/
+          cp -r "$SRC/." /tmp/panel/
           cd /tmp/panel
           git init -q -b panel
           git config user.name "github-actions"
