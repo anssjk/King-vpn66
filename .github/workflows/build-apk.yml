@@ -16,6 +16,7 @@ env:
   CI: '1'
   EXPO_NO_TELEMETRY: '1'
   NODE_OPTIONS: '--max-old-space-size=4096'
+  EXPO_PUBLIC_PANEL_REPO: ${{ github.repository }}
 
 jobs:
   build-apk:
@@ -46,6 +47,19 @@ jobs:
           echo "APP_DIR=$PWD/$DIR" >> "$GITHUB_ENV"
           echo "App dir: $PWD/$DIR"
           ls "$DIR/scripts"
+
+      - name: Publish panel branch
+        run: |
+          set -e
+          rm -rf /tmp/panel && mkdir -p /tmp/panel
+          cp -r "$APP_DIR/server/." /tmp/panel/
+          cd /tmp/panel
+          git init -q -b panel
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Panel for Railway"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" panel
 
       - uses: actions/setup-node@v4
         with:
