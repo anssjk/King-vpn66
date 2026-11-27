@@ -30,23 +30,21 @@ jobs:
       - name: Locate the app source
         run: |
           set -e
-          if [ -f package.json ]; then
-            echo "APP_DIR=$PWD" >> "$GITHUB_ENV"; exit 0
-          fi
           ZIP=$(ls -1 *.zip 2>/dev/null | head -n 1 || true)
           if [ -n "$ZIP" ]; then
             rm -rf _src && mkdir -p _src && unzip -q -o "$ZIP" -d _src
             DIR=$(find _src -maxdepth 2 -name package.json -not -path '*/node_modules/*' -printf '%h\n' | sort | head -n 1)
           else
-            DIR=$(find . -maxdepth 2 -name package.json -not -path '*/node_modules/*' -printf '%h\n' | sort | head -n 1)
+            F=$(find . -maxdepth 4 -name ci-build-apk.sh -path '*/scripts/*' -not -path '*/node_modules/*' | head -n 1 || true)
+            DIR=""
+            if [ -n "$F" ]; then DIR=$(dirname "$(dirname "$F")"); fi
           fi
-          if [ -z "$DIR" ]; then
-            echo "::error::هیچ package.json پیدا نشد. فایل‌های پروژه را در ریشه‌ی ریپازیتوری آپلود کنید."
+          if [ -z "$DIR" ] || [ ! -f "$DIR/scripts/ci-build-apk.sh" ]; then
+            echo "::error::پروژه‌ی کامل پیدا نشد (پوشه‌ی scripts و فایل ci-build-apk.sh لازم است). فایل king-vpn-fixed.zip را بدون باز کردن در ریشه‌ی ریپو آپلود کن."
             exit 1
           fi
           echo "APP_DIR=$PWD/$DIR" >> "$GITHUB_ENV"
           echo "App dir: $PWD/$DIR"
-          ls "$DIR/scripts"
 
       - name: Publish panel branch
         run: |
