@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: king-vpn-panel
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: frankfurt
+    healthCheckPath: /health
+    envVars:
+      - key: ADMIN_KEY
+        generateValue: true
